@@ -1,0 +1,243 @@
+# Source: traefikv2/templates/rbac/serviceaccount.yaml
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: traefik
+  namespace: ingress
+  labels:
+    app.kubernetes.io/name: traefik
+---
+# Source: traefikv2/templates/rbac/clusterrole.yaml
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: traefik
+  namespace: ingress
+  annotations:
+    reloader.stakater.com/auto: "true"
+  labels:
+    app.kubernetes.io/name: traefik
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - endpoints
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions
+      - networking.k8s.io
+    resources:
+      - ingresses
+      - ingressclasses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions
+      - networking.k8s.io
+    resources:
+      - ingresses/status
+    verbs:
+      - update
+  - apiGroups:
+      - traefik.containo.us
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+      - middlewares
+      - middlewaretcps
+      - tlsoptions
+      - tlsstores
+      - traefikservices
+      - serverstransports
+    verbs:
+      - get
+      - list
+      - watch
+---
+# Source: traefikv2/templates/rbac/clusterrolebinding.yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: traefik
+  namespace: ingress
+  labels:
+    app.kubernetes.io/name: traefik
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traefik
+subjects:
+  - kind: ServiceAccount
+    name: traefik
+    namespace: ingress
+---
+# Source: traefikv2/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik
+  namespace: ingress
+  labels:
+    app.kubernetes.io/name: traefik
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "9100"
+      labels:
+        app.kubernetes.io/name: traefik
+        app.kubernetes.io/class: traefik-ingress
+    spec:
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: traefik-config
+          configMap:
+            name: traefik-config
+            defaultMode: 420
+      containers:
+        - name: traefik
+          image: traefik:2.7
+          args:
+            - "--global.checknewversion"
+            - "--global.sendanonymoususage"
+            - "--entryPoints.metrics.address=:9100/tcp"
+            - "--entryPoints.traefik.address=:9000/tcp"
+            - "--entryPoints.web.address=:8000/tcp"
+            - "--entryPoints.websecure.address=:8443/tcp"
+            - "--api.dashboard=true"
+            - "--ping=true"
+            - "--metrics.prometheus=true"
+            - "--metrics.prometheus.entrypoint=metrics"
+            - "--providers.file.filename=/config/traefik.yml"
+            - "--providers.kubernetescrd"
+            - "--providers.kubernetesingress"
+            - "--providers.kubernetesingress.ingressclass=traefik"
+            - "--providers.kubernetesingress.ingressendpoint.publishedservice=ingress/traefik"
+            - --providers.kubernetescrd.allowExternalNameServices=true
+            - --providers.kubernetesIngress.allowExternalNameServices=true
+            - "--entrypoints.websecure.http.tls=true"
+          ports:
+            - name: metrics
+              containerPort: 9100
+              protocol: TCP
+            - name: traefik
+              containerPort: 9000
+              protocol: TCP
+            - name: web
+              containerPort: 8000
+              protocol: TCP
+            - name: websecure
+              containerPort: 8443
+              protocol: TCP
+          resources: {}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: ssl-certificates
+              mountPath: /ssl
+            - name: traefik-config
+              mountPath: /config/traefik.yml
+              subPath: traefik.yml
+            - name: traefik-config
+              mountPath: /srv/ssl/localhost.pem
+              subPath: localhost.pem
+            - name: traefik-config
+              mountPath: /srv/ssl/localhost-key.pem
+              subPath: localhost-key.pem
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 9000
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 2
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 9000
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 2
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 1
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            runAsUser: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
+      dnsPolicy: ClusterFirst
+      serviceAccountName: traefik
+      serviceAccount: traefik
+      securityContext:
+        fsGroup: 65532
+      schedulerName: default-scheduler
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: system-cluster-critical
+---
+# Source: traefikv2/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik
+  namespace: ingress
+  labels:
+    app.kubernetes.io/name: traefik
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: traefik
+  ports:
+    - port: 80
+      name: web
+      targetPort: "web"
+      protocol: "TCP"
+    - port: 443
+      name: websecure
+      targetPort: "websecure"
+      protocol: "TCP"
